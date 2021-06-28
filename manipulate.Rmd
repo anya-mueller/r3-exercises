@@ -1,0 +1,170 @@
+---
+title: "manipulate"
+author: "Anya Mueller"
+date: "21/06/2021"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: "show"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+website: https://noaa-iea.github.io/r3-train/manipulate.html
+slides: https://docs.google.com/presentation/d/1lilrIzlD5Y2vPEax4fao8GqS-TsxSzNMfyGPgKr7TlM/edit
+
+Adam text editor = made by github folks, good for looking at merge conflicts
+
+icons = rpackage for putting icons into rmarkdown
+
+try to participate in the github community! (via forks and pull requests)
+
+data science is mostly janitor work, its usually very easy to make a model, but hard to get data into the right form
+
+tidy data: 
+each variable is in its own column, each observation is in its own row
+
+be able to go between wide and long format
+
+pipes increase readability - very good!
+
+R for data science = the bible for data science
+
+readxl - for reading excel spreadsheets
+
+NOTE: there is a visual editor for Rmarkdown files
+
+## Read online table <- heading 
+
+### Download table (`*.csv`) <- subheading
+
+```{r}
+# set variables
+csv_url  <- "https://oceanview.pfeg.noaa.gov/erddap/tabledap/cciea_AC.csv"
+dir_data <- "data"
+
+# derived variables
+csv <- file.path(dir_data, basename(csv_url))
+
+# create directory
+dir.create(dir_data)
+
+# download file
+download.file(csv_url, csv)
+```
+
+### Read table `read.csv()`
+```{r}
+# attempt to read csv
+d <- read.csv(csv)
+
+# show the data frame
+d #the second line is units, we don't want that
+
+#convert to tibble
+tibble::tibble(d)
+
+# read csv by skipping first two lines, so no header
+d <- read.csv(csv, skip = 2, header = FALSE)
+d
+
+# update data frame to original column names
+names(d) <- names(read.csv(csv))
+d
+
+#converto to tibble
+tibble::tibble(d)
+```
+
+### Show table `DT::datatable()`
+
+```{r}
+# show table
+DT::datatable(d) # make interactive data table
+```
+
+### Manipulate with `dplyr`
+
+```{r}
+library(DT)
+library(dplyr)
+
+d <- d %>% 
+  # tibble
+  tibble() %>% 
+  # mutate time
+  mutate(
+    time = as.Date(substr(time, 1, 10))) %>% 
+  # select columns
+  select(
+    time, 
+    starts_with("total_fisheries_revenue")) %>% 
+  # filter rows
+  filter(
+    time >= as.Date("1981-01-01"))
+
+datatable(d)
+```
+
+### Tidy with `tidyr`
+
+```{r}
+library(tidyr)
+
+d <- d %>% 
+  pivot_longer(-time) #observations to be unique by time
+
+datatable(d)
+```
+
+### Summarize with `dplyr`
+
+```{r}
+library(stringr) 
+
+d <- d %>% 
+  mutate(
+    region = str_replace(name, "total_fisheries_revenue_", "")) %>% 
+  select(time, region, value)
+datatable(d)
+
+d_sum <- d %>% 
+  group_by(region) %>% 
+  summarize(
+    avg_revenue = mean(value))
+datatable(d_sum) %>% 
+  formatCurrency("avg_revenue") #format into currency
+```
+
+### Apply functions with `purrr` on a `nest`'ed `tibble`
+
+Asking the question : What’s the trend over time for fishing revenue by region?
+
+```{r}
+library(purrr) #we are going to nest a bunch of content
+
+n <- d %>% 
+  group_by(region) %>% 
+  nest(
+    data = c(time, value)) #make a new list column called data
+n #can see that there is a tibble in the data columns
+
+n <- n %>% #make a linear model per region of data
+  mutate(
+    lm    = map(data, function(d){ #map takes the input of data, puts it into a fucntion, returns a list
+      #browser() <- lets us look inside the function
+      lm(value ~ time, d) } ),
+    trend = map_dbl(lm, function(m){
+      coef(summary(m))["time","Estimate"] })) # make new column with linear model, extract trend from linear model
+n
+n %>% 
+  select(region, trend) %>% 
+  datatable()
+```
+
