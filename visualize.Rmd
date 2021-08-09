@@ -242,3 +242,4 @@ d_rgn_wide %>%
   dyRangeSelector()
 ```
 
+interactive = online visualization made with java script -> you don't need an external server to play with these plots

@@ -1,0 +1,222 @@
+---
+title: "Map"
+author: "Anya Mueller"
+date: "12/07/2021"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+lesson: https://noaa-iea.github.io/r3-train/map.html
+
+challenge = try to put a round projection onto a flat surface
+
+different projections:
+Mercator - distorts latitude
+
+Spatial dat types:
+- tables
+- feature class = table with filed containing point, line or polygon <- vector is corrector
+- raster = pixilized <- is faster , for doing calculations
+
+Vectors:
+lines and points
+
+Raster:
+coordinate of values
+tiff preserves original values
+
+GIS packages in R:
+ggmap
+leaflet (HTML widget - for HTML visualization)
+raster
+sf
+sp - has been superseeded by sf
+
+##install packages
+```{r}
+# require() is like library() except returns FALSE if missing (vs error)
+if (!require(librarian)){
+  install.packages("librarian")
+  library(librarian)
+}
+# librarian::shelf() is like library() except installs package if missing, 
+#   even from Github if include owner/repo
+shelf(
+  NOAA-EDAB/ecodata, #give github owner and repo  (owner/repo)
+  sf)
+#if you don't have latest version you might get error
+#can update packages in Packages tab!
+```
+
+##Get spatial data
+```{r}
+ecodata::epu_sf # a dataset loaded into the package - a spatial feature object
+#sf object has extended dataframe with geometry
+class(epu_sf)
+epu_sf <- ecodata::epu_sf %>% 
+  st_transform(4326) #change crs into world geodetic system 84
+
+g1 <- epu_sf$geometry[1] #one geometry is its own list of polygons
+
+plot(epu_sf) #shows representation of each column
+
+#look at one column
+plot(epu_sf["EPU"])
+```
+But where in the world is this?
+```{r}
+shelf(mapview)
+
+mapview(epu_sf) #interactive map
+
+#another interactive map
+shelf(leaflet)
+
+leaflet() %>% 
+  addTiles() %>%
+  addProviderTiles(providers$Esri.OceanBasemap) %>% 
+  addPolygons(data = epu_sf)
+```
+
+##Extract from erddap
+```{r}
+shelf(
+  here,
+  rerddap)
+
+sst_gd_rds <- here("data",
+                   "sst_gd.rds")
+
+#get bounding box
+epu_bb <- st_bbox(epu_sf) #st bounding box gives lat and long bounds
+epu_bb # get xmin/max, ymin/max
+
+#get erdap data info
+sst_info <- info('jplMURSST41mday')
+sst_info
+```
+
+```{r}
+if (!file.exists(sst_gd_rds)){ #if file does not exist, do the following
+  sst_gd <- griddap(
+    sst_info,
+    fields    = "sst",
+    time      = c("2020-06-16", "2021-06-16"),
+    longitude = epu_bb[c("xmin", "xmax")],
+    latitude  = epu_bb[c("ymin", "ymax")])
+  saveRDS(sst_gd, file = sst_gd_rds)  
+}
+sst_gd <- readRDS(sst_gd_rds)
+
+sst_gd
+
+names(sst_gd) #is a summary object and a data object
+```
+
+Lets plot this data with ggplot! - static plot
+```{r}
+shelf(
+  dplyr,
+  ggplot2,
+  mapdata)
+
+# coastline
+coast <- map_data(
+  "worldHires", #get coastline
+  xlim = epu_bb[c("xmin", "xmax")],
+  ylim = epu_bb[c("ymin", "ymax")],
+  lforce = "e")
+
+sst_df_last <- sst_gd$data %>%
+    filter(time == max(time)) #get most recent time
+
+summary(sst_df_last)
+
+ggplot(
+  data = sst_df_last, 
+  aes(x = lon, y = lat, fill = sst)) +
+  geom_polygon( #pulls polygon from coast
+    data = coast,
+    aes(x = long, y = lat, group = group), fill = "grey80") +
+  geom_tile() + #plot data of interest
+  scale_fill_gradientn(
+    #rerddap has some good colour gradients for marine data
+    colors = rerddap::colors$temperature, na.value =  NA) +
+  theme_bw() + 
+  ylab("Latitude") + 
+  xlab("Longitude") +
+  ggtitle("Latest SST")
+```
+
+lets now extract the sst for the raster time series
+```{r}
+shelf(
+  purrr,
+  raster,
+  sp,
+  tidyr)
+select <- dplyr::select
+
+sst_tbl <- tibble(sst_gd$data) %>%
+  mutate(
+    # round b/c of uneven intervals
+    #   unique(sst_gd$data$lon) %>% sort() %>% diff() %>% table()
+    #     0.0099945068359375 0.0100021362304688
+    lon  = round(lon, 2),
+    lat  = round(lat, 2),
+    date = as.Date(time, "%Y-%m-%dT00:00:00Z")) %>%
+  select(-time) %>% 
+  filter(!is.na(sst)) # 13M to 8.8M rows
+
+sst_tbl_mo <- sst_tbl %>% 
+  #put an entire dataframe into its own cell, reducing to unique vlaues for column not included into the nest (date)
+  nest(data = c(lat, lon, sst)) %>% 
+  mutate(
+    #convert each month into its own raster
+    raster = purrr::map(data, function(x) { #anonomus function (not named) - feeds in x, gives back raster layer
+      #browser()
+      sp::coordinates(x) <- ~ lon + lat
+      sp::gridded(x)     <- T
+      raster::raster(x)
+    }))
+
+sst_stk <- raster::stack(sst_tbl_mo$raster)
+names(sst_stk) <- strftime(sst_tbl_mo$date, "sst_%Y.%m")
+raster::crs(sst_stk) <- 4326
+shelf(stringr)
+
+epu_sst_avg <- raster::extract(sst_stk, epu_sf, fun = mean, na.rm = T)
+epu_sst_sd  <- raster::extract(sst_stk, epu_sf, fun = sd, na.rm = T)
+
+epu_sst_tbl <- rbind(
+  epu_sst_avg %>% 
+    as_tibble() %>% 
+    cbind(
+      EPU  = epu_sf$EPU,
+      stat = "mean") %>% 
+    pivot_longer(-c(EPU, stat)),
+  epu_sst_sd %>% 
+    as_tibble() %>% 
+    cbind(
+      EPU = epu_sf$EPU,
+      stat = "sd") %>% 
+    pivot_longer(-c(EPU, stat))) %>% 
+  mutate(
+    EPU  = as.character(EPU),
+    date = as.double(str_replace(name, "sst_", ""))) %>% 
+  select(-name) %>% 
+  pivot_wider(
+    names_from  = EPU, 
+    values_from = value)
+
+#visualize
+shelf(dygraphs)
+
+epu_sst_tbl %>% 
+  filter(stat == "mean") %>% 
+  select(-stat) %>% 
+  dygraph()
+```
+
